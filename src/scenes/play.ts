@@ -4,23 +4,23 @@ import {
   type GameState, type Interaction, type Order, type Piece, type StationId,
 } from '../core/game';
 import { BaseScene } from '../engine/scenes';
+import { drawWorkshopRoom, WORKSHOP_PALETTE } from './workshop-room';
+import { lightWorkshopFurnace, playWorkshopEffect, WorkshopBench, type WorkshopStation } from './workshop-stations';
 
-const INK = '#422e25';
-const PAPER = '#fff1d2';
-const GREEN = '#294b3d';
-const AMBER = '#9a4b22';
+const { ink: INK, cream: PAPER, green: GREEN, gold: GOLD } = WORKSHOP_PALETTE;
+const AMBER = '#783c25';
 
 const STATIONS = [
-  { id: 'rack', x: 145, y: 237, label: '料架', art: 'tile_crate' },
-  { id: 'shape', x: 291, y: 237, label: '整坯台', art: 'tool_mold' },
-  { id: 'heat', x: 437, y: 237, label: '炉台', art: 'tool_furnace_hot' },
-  { id: 'forge', x: 583, y: 237, label: '铁砧', art: 'anvil' },
-  { id: 'cool', x: 729, y: 237, label: '冷却槽', art: 'tool_quench_bucket' },
-  { id: 'bufferA', x: 319, y: 504, label: '暂存一', art: '' },
-  { id: 'bufferB', x: 470, y: 504, label: '暂存二', art: '' },
-  { id: 'delivery', x: 615, y: 504, label: '交付台', art: 'item_tray_silk' },
-  { id: 'finish', x: 773, y: 504, label: '修整台', art: 'tool_whetstone' },
-] as const satisfies ReadonlyArray<{ id: StationId; x: number; y: number; label: string; art: string }>;
+  { id: 'rack', x: 145, y: 237, label: '料架' },
+  { id: 'shape', x: 291, y: 237, label: '整坯台' },
+  { id: 'heat', x: 437, y: 237, label: '炉台' },
+  { id: 'forge', x: 583, y: 237, label: '铁砧' },
+  { id: 'cool', x: 729, y: 237, label: '冷却槽' },
+  { id: 'bufferA', x: 319, y: 504, label: '暂存一' },
+  { id: 'bufferB', x: 470, y: 504, label: '暂存二' },
+  { id: 'delivery', x: 615, y: 504, label: '交付台' },
+  { id: 'finish', x: 773, y: 504, label: '修整台' },
+] as const satisfies readonly WorkshopStation[];
 
 type Station = (typeof STATIONS)[number];
 type Direction = 'left' | 'right' | 'up' | 'down';
@@ -32,14 +32,9 @@ const CUSTOMER = {
   firewood: 'char_guard_neutral',
 } as const;
 
-interface StationView {
-  outline: Phaser.GameObjects.Rectangle;
-  piece: Phaser.GameObjects.Image;
-  status: Text;
-}
-
 interface OrderView {
   panel: Phaser.GameObjects.Rectangle;
+  portraitFrame: Phaser.GameObjects.Arc;
   knife: Phaser.GameObjects.Image;
   customer: Phaser.GameObjects.Image;
   name: Text;
@@ -50,12 +45,13 @@ interface OrderView {
 const seconds = (ms: number) => String(Math.max(0, Math.ceil(ms / 1000))).padStart(2, '0');
 
 export class PlayScene extends BaseScene {
-  private stationViews = new Map<StationId, StationView>();
+  private stationViews = new Map<StationId, WorkshopBench>();
   private orderViews: OrderView[] = [];
   private movement: Partial<Record<Direction, Phaser.Input.Keyboard.Key[]>> = {};
   private selectedId: number | null = null;
   private near: Station | null = null;
   private noticeExpires = 0;
+  private walkCycle = 0;
   private player!: Phaser.GameObjects.Image;
   private shadow!: Phaser.GameObjects.Ellipse;
   private carried!: Phaser.GameObjects.Image;
@@ -76,17 +72,19 @@ export class PlayScene extends BaseScene {
   create() {
     this.selectedId = null;
     this.noticeExpires = 0;
+    this.walkCycle = 0;
     this.stationViews.clear();
     this.drawWorkshop();
-    for (const station of STATIONS) this.createStation(station);
+    for (const station of STATIONS) this.stationViews.set(station.id, new WorkshopBench(this, station));
+    lightWorkshopFurnace(this, STATIONS[2]);
     this.createHud();
 
-    this.shadow = this.add.ellipse(145, 315, 39, 13, 0x40291d, 0.22).setDepth(4);
-    this.player = this.art(this.texture('char_apprentice_topdown', 'char_apprentice_neutral'), 145, 313, 62)
-      .setOrigin(0.5, 1).setDepth(8);
-    this.carried = this.art('iron_dark', 0, 0, 37).setDepth(9);
-    this.handLabel = this.label(0, 0, '', { size: 15, weight: 700, align: 'center', color: PAPER, stroke: INK }).setDepth(10);
-    this.forgeMeter = this.add.graphics().setDepth(12);
+    this.shadow = this.add.ellipse(145, 315, 38, 12, 0x35271e, 0.37).setDepth(-48);
+    this.player = this.art(this.texture('char_apprentice_topdown', 'char_apprentice_neutral'), 145, 313, 61)
+      .setOrigin(0.5, 1);
+    this.carried = this.art('iron_dark', 0, 0, 37);
+    this.handLabel = this.label(0, 0, '', { size: 15, weight: 700, align: 'center', color: PAPER, stroke: INK }).setDepth(660);
+    this.forgeMeter = this.add.graphics().setDepth(650);
 
     const keyboard = this.input.keyboard;
     const keys = (...names: string[]) => keyboard ? names.map((name) => keyboard.addKey(name)) : [];
@@ -111,57 +109,42 @@ export class PlayScene extends BaseScene {
     if (events.expired) this.showNotice(`${events.expired} 张订单超时，刀坯已回收`);
     if (events.cooled) {
       this.sfx('sfx_hiss');
-      this.effect('fx_steam', STATIONS[4]);
+      playWorkshopEffect(this, 'fx_splash', STATIONS[4], 49, 500);
+      playWorkshopEffect(this, 'fx_steam', STATIONS[4], 42, 760);
     }
+    const { x, y } = this.player;
     this.move(delta);
+    this.updateWalk(delta, this.player.x !== x || this.player.y !== y);
     this.refresh();
   }
 
   private drawWorkshop() {
-    this.cameras.main.setBackgroundColor('#e8dac0');
-    const floor = this.add.graphics();
-    floor.fillStyle(0x294b3d).fillRoundedRect(24, 21, 1232, 90, 16);
-    floor.fillStyle(0x9b6948).fillRoundedRect(24, 133, 865, 529, 16);
-    floor.fillStyle(0xe9c79a).fillRoundedRect(37, 146, 839, 503, 11);
-    floor.lineStyle(1, 0xbc8d65, 0.5);
-    for (let y = 190; y < 646; y += 40) floor.lineBetween(39, y, 874, y);
-    floor.fillStyle(0xf8edcf).fillRoundedRect(906, 133, 350, 529, 16);
-    floor.lineStyle(2, 0xd9bb94).strokeRoundedRect(906, 133, 350, 529, 16);
-    this.label(50, 53, '老周的铁匠铺', { size: 31, color: PAPER, weight: 700 });
-    this.label(50, 87, 'WASD 移动   ·   1–3 选单   ·   空格 操作   ·   F 落锤', { size: 17, color: '#e0e8cf' });
-    this.label(54, 167, '加工区', { size: 16, color: INK, weight: 700 });
-    this.label(54, 628, '暂存与交付', { size: 16, color: INK, weight: 700 });
-    this.label(929, 162, '订单', { size: 25, color: GREEN, weight: 700 });
-  }
-
-  private createStation(station: Station) {
-    const { x, y, art, label } = station;
-    const table = this.add.graphics();
-    table.fillStyle(0x7f4f34).fillRoundedRect(x - 56, y - 21, 112, 57, 10);
-    table.fillStyle(0xaa7149).fillRoundedRect(x - 56, y - 26, 112, 49, 10);
-    table.fillStyle(0xc99563).fillRoundedRect(x - 50, y - 23, 100, 34, 7);
-    if (art) this.art(art, x, y + 16, station.id === 'heat' ? 91 : 72).setOrigin(0.5, 0.85);
-    const outline = this.add.rectangle(x, y + 4, 121, 73).setStrokeStyle(3, 0xfff2aa);
-    this.label(x, y + 54, label, { size: 18, align: 'center', weight: 700 }).setDepth(11);
-    const status = this.label(x, y + 76, '', { size: 15, align: 'center', color: GREEN, weight: 700 }).setDepth(11);
-    const piece = this.art('iron_dark', x + 32, y + 12, 37).setDepth(2).setVisible(false);
-    this.stationViews.set(station.id, { outline, piece, status });
+    drawWorkshopRoom(this);
+    this.art('hammer_small', 62, 51, 17).setRotation(-0.48);
+    this.label(85, 51, '老周的铁匠铺', { size: 30, color: PAPER, weight: 700 });
+    this.label(56, 87, 'WASD 移动   ·   1–3 选单   ·   空格 操作   ·   F 落锤', { size: 16, color: '#d9e5cf' });
+    this.label(587, 159, '加工区', { size: 13, color: PAPER, weight: 700, align: 'center' });
+    this.label(57, 591, '暂存与交付', { size: 15, color: PAPER, weight: 700, stroke: '#785438' });
+    this.label(939, 163, '订单', { size: 20, color: PAPER, weight: 700 });
   }
 
   private createHud() {
-    this.dayLabel = this.label(676, 50, '', { size: 22, color: PAPER, weight: 700, align: 'center' });
-    this.clock = this.label(859, 64, '', { size: 27, color: PAPER, weight: 700, align: 'center' });
-    this.score = this.label(1227, 64, '', { size: 23, color: PAPER, weight: 700, align: 'right' });
-    this.notice = this.label(34, 690, '', { size: 19, weight: 700, color: GREEN });
+    this.dayLabel = this.label(678, 64, '', { size: 20, color: PAPER, weight: 700, align: 'center' });
+    this.art('icon_clock', 795, 64, 23);
+    this.clock = this.label(875, 64, '', { size: 23, color: PAPER, weight: 700, align: 'center' });
+    this.art('icon_star', 1045, 64, 23);
+    this.score = this.label(1213, 64, '', { size: 23, color: GOLD, weight: 700, align: 'right' });
+    this.notice = this.label(45, 690, '', { size: 17, weight: 700, color: GREEN });
     this.orderViews = Array.from({ length: 3 }, (_, index) => {
       const y = 222 + index * 102;
-      const panel = this.add.rectangle(1081, y, 307, 88, 0xfff7e7).setStrokeStyle(2, 0xd9bb94);
+      const panel = this.add.rectangle(1081, y + 1, 300, 77, 0xfff3d6).setStrokeStyle(2, 0xba905e);
+      const portraitFrame = this.add.circle(954, y + 3, 23, 0xe6ca9a).setStrokeStyle(1, 0xc29d67);
       const customer = this.art('char_auntie_neutral', 954, y + 3, 37);
       const knife = this.art('item_knife', 993, y + 2, 42);
       const name = this.label(1022, y - 18, '', { size: 19, weight: 700 });
       const status = this.label(1022, y + 15, '', { size: 15, color: GREEN });
       const time = this.label(1221, y + 15, '', { size: 16, align: 'right', weight: 700 });
-      return { panel, customer, knife, name, status, time };
+      return { panel, portraitFrame, customer, knife, name, status, time };
     });
     this.coach = this.art('char_laozhou_neutral', 949, 546, 56);
     this.instructions = this.label(982, 491, '', { size: 17, color: INK, wrap: 247 });
@@ -220,13 +203,21 @@ export class PlayScene extends BaseScene {
     if (dx) this.player.setFlipX(dx < 0);
   }
 
+  private updateWalk(delta: number, moving: boolean) {
+    this.walkCycle = moving ? this.walkCycle + delta * 0.021 : 0;
+    const lift = moving ? Math.abs(Math.sin(this.walkCycle)) : 0;
+    this.player.setOrigin(0.5, 1 + lift * 3 / this.player.displayHeight);
+    this.shadow.setScale(1 - lift * 0.12, 1 - lift * 0.09);
+  }
+
   private refresh() {
     const game = this.ctx.game;
     const config = this.ctx.config;
     const tutorial = game.phase === 'tutorial';
     const day = config.days[game.day - 1];
     this.near = this.nearestStation();
-    this.shadow.setPosition(this.player.x, this.player.y);
+    this.player.setDepth(this.player.y + 2);
+    this.shadow.setPosition(this.player.x, this.player.y - 1);
     this.dayLabel.setText(tutorial ? '练习单' : `第 ${game.day} 天 / ${config.days.length}`);
     this.clock.setText(tutorial ? '不限时' : `收工 ${seconds(day.duration - game.elapsed)} 秒`);
     this.score.setText(tutorial ? `${game.score} 分` : `${game.score} / ${day.target} 分`);
@@ -239,7 +230,8 @@ export class PlayScene extends BaseScene {
     this.refreshOrders(game);
 
     const held = game.held;
-    this.carried.setVisible(Boolean(held)).setPosition(this.player.x + 28, this.player.y - 27);
+    this.carried.setVisible(Boolean(held)).setDepth(this.player.depth + 1)
+      .setPosition(this.player.x + (this.player.flipX ? -28 : 28), this.player.y - 27);
     this.handLabel.setVisible(Boolean(held)).setPosition(this.player.x + 3, this.player.y + 15);
     if (held) {
       this.carried.setTexture(this.pieceArt(held)).setDisplaySize(42, 42);
@@ -269,17 +261,22 @@ export class PlayScene extends BaseScene {
       : null;
     for (const [id, view] of this.stationViews) {
       const bench = id === 'rack' || id === 'delivery' ? null : game.benches[id];
-      const selected = this.near?.id === id;
-      view.outline.setVisible(selected || tutorialTarget === id).setStrokeStyle(3, selected ? 0xfff2aa : 0x399b66);
+      const nearbyPlayer = this.near?.id === id ? this.player.x : null;
       view.piece.setVisible(Boolean(bench));
-      view.status.setText(selected ? '空格' : '');
-      if (bench) {
-        view.piece.setTexture(this.pieceArt(bench.piece)).setDisplaySize(37, 37);
-        const slot = game.orders.find(({ id }) => id === bench.piece.orderId)?.slot;
-        const status = bench.completesAt !== null ? seconds(bench.completesAt - game.elapsed) + ' 秒'
-          : id === 'bufferA' || id === 'bufferB' ? '暂存' : '可取';
-        view.status.setText(`#${slot} · ${status}`);
+      if (!bench) {
+        view.update('idle', nearbyPlayer !== null ? '空格' : '', nearbyPlayer, tutorialTarget === id, 0);
+        continue;
       }
+      view.piece.setTexture(this.pieceArt(bench.piece)).setDisplaySize(35, 35);
+      const slot = game.orders.find(({ id }) => id === bench.piece.orderId)?.slot;
+      const remaining = bench.completesAt === null ? null : bench.completesAt - game.elapsed;
+      const stored = id === 'bufferA' || id === 'bufferB';
+      const status = remaining !== null ? seconds(remaining) + ' 秒' : stored ? '暂存' : '可取';
+      const state = remaining !== null ? 'working' : stored ? 'stored' : 'ready';
+      const { steps } = this.ctx.config;
+      const duration = id === 'rack' || id === 'delivery' || stored ? 0 : steps[id].duration;
+      const progress = remaining !== null && duration > 0 ? 1 - remaining / duration : 0;
+      view.update(state, `#${slot} · ${status}`, nearbyPlayer, tutorialTarget === id, progress);
     }
   }
 
@@ -293,8 +290,8 @@ export class PlayScene extends BaseScene {
       const remaining = order.deadline === null ? null : order.deadline - game.elapsed;
       const urgent = remaining !== null && remaining <= 8000;
       const selected = order.id === this.selectedId;
-      view.panel.setFillStyle(urgent ? 0xfce1c4 : 0xfff7e7)
-        .setStrokeStyle(selected ? 4 : 2, selected ? 0x477253 : urgent ? 0xb65231 : 0xd9bb94);
+      view.panel.setFillStyle(urgent ? 0xf8d3a6 : selected ? 0xf4e9b9 : 0xfff3d6)
+        .setStrokeStyle(selected ? 3 : 2, selected ? 0x477253 : urgent ? 0xb65231 : 0xba905e);
       view.customer.setTexture(CUSTOMER[order.blade]).setDisplaySize(37, 49);
       view.knife.setTexture(this.knifeArt(order.blade)).setDisplaySize(42, 42);
       view.name.setText(`${order.slot}  ${blade.name}`);
@@ -320,9 +317,11 @@ export class PlayScene extends BaseScene {
     const x = 508;
     const y = 177;
     const width = 150;
-    bar.fillStyle(0x593725).fillRoundedRect(x, y, width, 16, 5);
-    bar.fillStyle(0x93c482).fillRect(x + strikeFrom * width, y + 2, (strikeTo - strikeFrom) * width, 12);
-    bar.fillStyle(0xfff2b0).fillRect(x + progress * width - 2, y - 3, 4, 22);
+    bar.fillStyle(0x3e2b23).fillRoundedRect(x - 4, y - 3, width + 8, 22, 5);
+    bar.lineStyle(1, 0xe4bd74).strokeRoundedRect(x - 4, y - 3, width + 8, 22, 5);
+    bar.fillStyle(0x6c4937).fillRoundedRect(x, y + 1, width, 14, 4);
+    bar.fillStyle(0xa1d78b).fillRect(x + strikeFrom * width, y + 2, (strikeTo - strikeFrom) * width, 12);
+    bar.fillStyle(0xffedb6).fillRoundedRect(x + progress * width - 2, y - 2, 4, 20, 2);
   }
 
   private tutorialHint(game: GameState) {
@@ -336,22 +335,17 @@ export class PlayScene extends BaseScene {
     this.showNotice(result.message);
     if (result.kind === 'delivered') {
       this.sfx('sfx_deliver');
-      if (this.near) this.effect('fx_star', this.near);
+      if (this.near) playWorkshopEffect(this, 'fx_star', this.near, 59, 740);
     }
     if (result.kind === 'precise' || result.kind === 'ordinary') {
       this.sfx(result.kind === 'precise' ? 'sfx_hammer_heavy' : 'sfx_hammer_light');
-      if (result.kind === 'precise' && this.near) this.effect('fx_spark', this.near);
+      if (this.near) playWorkshopEffect(this, 'fx_spark', this.near, result.kind === 'precise' ? 72 : 42);
     }
   }
 
   private showNotice(message: string) {
     this.notice.setText(message).setColor(AMBER);
     this.noticeExpires = this.ctx.game.elapsed + 2400;
-  }
-
-  private effect(id: string, station: Station) {
-    const image = this.art(id, station.x, station.y - 23, 65).setDepth(13);
-    this.tweens.add({ targets: image, y: image.y - 36, scale: 0.16, alpha: 0, duration: 520, onComplete: () => image.destroy() });
   }
 
   private pieceArt(piece: Piece) {
