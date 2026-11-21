@@ -107,7 +107,9 @@ try {
     await page.keyboard.up('KeyD');
   }
   await page.mouse.click(584, 323);
+  await page.waitForFunction(() => Math.abs(document.querySelector('[data-workshop-music]').volume - 0.056) < 0.001);
   await page.mouse.click(605, 392);
+  await page.waitForFunction(() => Math.abs(globalThis.__phaser.sound.volume - 0.3) < 0.001);
   const audioState = () => page.evaluate(() => ({
     music: document.querySelector('[data-workshop-music]').volume,
     effects: globalThis.__phaser.sound.volume,
