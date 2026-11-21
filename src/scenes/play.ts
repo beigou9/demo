@@ -4,8 +4,8 @@ import {
   type GameState, type Interaction, type Order, type Piece, type StationId,
 } from '../core/game';
 import { BaseScene } from '../engine/scenes';
-import { drawWorkshopRoom, WORKSHOP_PALETTE } from './workshop-room';
-import { lightWorkshopFurnace, playWorkshopEffect, WorkshopBench, type WorkshopStation } from './workshop-stations';
+import { drawWorkshopRoom, WORKSHOP_GUIDE, WORKSHOP_PALETTE } from './workshop-room';
+import { lightWorkshopFurnace, playWorkshopEffect, rippleWorkshopWater, WorkshopBench, type WorkshopStation } from './workshop-stations';
 
 const { ink: INK, cream: PAPER, green: GREEN, gold: GOLD } = WORKSHOP_PALETTE;
 const AMBER = '#783c25';
@@ -43,6 +43,28 @@ interface OrderView {
 }
 
 const seconds = (ms: number) => String(Math.max(0, Math.ceil(ms / 1000))).padStart(2, '0');
+const guideWords = new Intl.Segmenter('zh-Hans', { granularity: 'word' });
+
+function wrapGuide(text: string, label: Text) {
+  const maxWidth = label.style.wordWrapWidth ?? Infinity;
+  const words: string[] = [];
+  for (const { segment } of guideWords.segment(text)) {
+    if (/^[，。！？：、；）]/u.test(segment) && words.length) words[words.length - 1] += segment;
+    else words.push(segment);
+  }
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line + word;
+    if (line && label.context.measureText(candidate.trimEnd()).width > maxWidth) {
+      lines.push(line.trimEnd());
+      line = word.trimStart();
+    } else {
+      line = candidate;
+    }
+  }
+  return [...lines, line.trimEnd()].join('\n');
+}
 
 export class PlayScene extends BaseScene {
   private stationViews = new Map<StationId, WorkshopBench>();
@@ -77,6 +99,7 @@ export class PlayScene extends BaseScene {
     this.drawWorkshop();
     for (const station of STATIONS) this.stationViews.set(station.id, new WorkshopBench(this, station));
     lightWorkshopFurnace(this, STATIONS[2]);
+    rippleWorkshopWater(this, STATIONS[4]);
     this.createHud();
 
     this.shadow = this.add.ellipse(145, 315, 38, 12, 0x35271e, 0.37).setDepth(-48);
@@ -129,7 +152,7 @@ export class PlayScene extends BaseScene {
   }
 
   private createHud() {
-    this.dayLabel = this.label(678, 64, '', { size: 20, color: PAPER, weight: 700, align: 'center' });
+    this.dayLabel = this.label(677, 64, '', { size: 23, color: PAPER, weight: 700, align: 'center' });
     this.art('icon_clock', 795, 64, 23);
     this.clock = this.label(875, 64, '', { size: 23, color: PAPER, weight: 700, align: 'center' });
     this.art('icon_star', 1045, 64, 23);
@@ -146,8 +169,11 @@ export class PlayScene extends BaseScene {
       const time = this.label(1221, y + 15, '', { size: 16, align: 'right', weight: 700 });
       return { panel, portraitFrame, customer, knife, name, status, time };
     });
-    this.coach = this.art('char_laozhou_neutral', 949, 546, 56);
-    this.instructions = this.label(982, 491, '', { size: 17, color: INK, wrap: 247 });
+    const guide = WORKSHOP_GUIDE;
+    const centerY = guide.y + guide.height / 2;
+    this.coach = this.art('char_laozhou_neutral', guide.x + guide.padding + guide.portrait / 2, centerY, guide.portrait);
+    this.instructions = this.label(guide.x + guide.padding, centerY, '', { size: 16, color: INK, wrap: guide.width - 2 * guide.padding })
+      .setOrigin(0, 0.5).setLineSpacing(4).setWordWrapCallback(wrapGuide);
     this.startButton = this.button({
       x: 1081, y: 619, w: 295, h: 51, size: 19, label: '进入第一天（Enter）', key: 'Enter',
       onClick: () => {
@@ -218,13 +244,12 @@ export class PlayScene extends BaseScene {
     this.near = this.nearestStation();
     this.player.setDepth(this.player.y + 2);
     this.shadow.setPosition(this.player.x, this.player.y - 1);
-    this.dayLabel.setText(tutorial ? '练习单' : `第 ${game.day} 天 / ${config.days.length}`);
+    this.dayLabel.setText(tutorial ? '练习单' : `${game.day} / ${config.days.length}`);
     this.clock.setText(tutorial ? '不限时' : `收工 ${seconds(day.duration - game.elapsed)} 秒`);
     this.score.setText(tutorial ? `${game.score} 分` : `${game.score} / ${day.target} 分`);
     this.notice.setText(game.elapsed < this.noticeExpires ? this.notice.text : '');
     this.startButton.setVisible(tutorial);
-    this.coach.setVisible(tutorial);
-    this.instructions.setX(tutorial ? 982 : 930).setText(tutorial ? this.tutorialHint(game) :
+    this.refreshGuide(tutorial, tutorial ? this.tutorialHint(game) :
       '领取订单后，按提示搬运刀坯。工位完成加工即可取回，赶不及的半成品可先暂存。');
     this.refreshStations(game);
     this.refreshOrders(game);
@@ -240,6 +265,17 @@ export class PlayScene extends BaseScene {
     }
 
     this.drawForgeMeter(game);
+  }
+
+  private refreshGuide(tutorial: boolean, hint: string) {
+    const guide = WORKSHOP_GUIDE;
+    const inset = tutorial ? guide.portrait + guide.gap : 0;
+    const x = guide.x + guide.padding + inset;
+    this.coach.setVisible(tutorial);
+    if (this.instructions.x !== x) {
+      this.instructions.setX(x).setWordWrapWidth(guide.width - 2 * guide.padding - inset);
+    }
+    this.instructions.setText(hint);
   }
 
   private nearestStation() {
