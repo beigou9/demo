@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+shots/
+coverage/
+.vite/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
